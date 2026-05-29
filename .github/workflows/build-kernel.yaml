@@ -1,0 +1,200 @@
+name: Build Android Kernel
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'false'
+      
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            python3 \
+            git \
+            curl \
+            wget \
+            cpio \
+            openssl
+      
+      - name: Install Clang Toolchain
+        run: |
+          # Install LLVM/Clang 12 (available on Ubuntu 22.04)
+          sudo apt-get install -y \
+            clang-12 \
+            lld-12 \
+            llvm-12 \
+            llvm-12-dev
+          
+          # Create symlinks - IMPORTANT: Use ld.lld-12 (full binary name on 22.04)
+          sudo ln -sf /usr/bin/clang-12 /usr/bin/clang
+          sudo ln -sf /usr/bin/clang++-12 /usr/bin/clang++
+          sudo ln -sf /usr/bin/ld.lld-12 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/lld-12 /usr/bin/lld
+          sudo ln -sf /usr/bin/llvm-ar-12 /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-12 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-12 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-12 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-readelf-12 /usr/bin/llvm-readelf
+          sudo ln -sf /usr/bin/llvm-size-12 /usr/bin/llvm-size
+          sudo ln -sf /usr/bin/llvm-strip-12 /usr/bin/llvm-strip
+      
+      - name: Install ARM64 Cross-compiler
+        run: |
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
+      
+      - name: Get Compiler Versions
+        run: |
+          echo "=== Clang Version ===" && clang --version
+          echo "=== LD.LLD Version ===" && ld.lld-12 --version
+          echo "=== ARM64 GCC Version ===" && aarch64-linux-gnu-gcc --version
+          echo "=== ARM64 Binutils ===" && aarch64-linux-gnu-ld --version
+      
+      - name: Load Device-Specific Kernel Configuration
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # Use the Samsung Galaxy A13 (Exynos850) specific config
+          make exynos850-a13nsxx_defconfig -j$(nproc)
+          
+          echo "✓ Config loaded successfully for Samsung Galaxy A13 (Exynos850)"
+          echo "=== Configuration Summary ===" && head -30 .config
+      
+      - name: Compile Kernel
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          
+          echo "Starting kernel compilation for Samsung Galaxy A13..."
+          make -j$(nproc) 2>&1 | tee build.log
+      
+      - name: Verify Build Artifacts
+        run: |
+          echo "=== Build Artifacts ===" && \
+          ls -lah arch/arm64/boot/ 2>/dev/null || echo "No boot directory yet"
+          
+          if [ -f arch/arm64/boot/Image.gz ]; then
+            echo "✓ Kernel Image built successfully!"
+            ls -lh arch/arm64/boot/Image.gz
+          else
+            echo "Checking for Image..."
+            find . -name "Image*" -type f 2>/dev/null | head -20
+          fi
+      
+      - name: Prepare Artifacts for Upload
+        run: |
+          mkdir -p artifacts
+          
+          if [ -f arch/arm64/boot/Image.gz ]; then
+            cp arch/arm64/boot/Image.gz artifacts/
+            echo "✓ Copied Image.gz"
+          fi
+          
+          if [ -f arch/arm64/boot/Image ]; then
+            cp arch/arm64/boot/Image artifacts/
+            echo "✓ Copied Image"
+          fi
+          
+          if [ -d arch/arm64/boot/dts ]; then
+            mkdir -p artifacts/dtbs
+            find arch/arm64/boot/dts -name "*.dtb" -exec cp {} artifacts/dtbs/ \; 2>/dev/null || true
+            echo "✓ Copied DTB files"
+          fi
+          
+          if [ -f build.log ]; then
+            cp build.log artifacts/
+            echo "✓ Copied build.log"
+          fi
+          
+          if [ -f .config ]; then
+            cp .config artifacts/kernel.config
+            echo "✓ Copied kernel config"
+          fi
+          
+          cat > artifacts/BUILD_MANIFEST.txt << 'EOF'
+          Samsung Galaxy A13 Kernel Build
+          ================================
+          
+          Device: Samsung Galaxy A13 (Exynos850)
+          Kernel Version: 4.19.325
+          Build Configuration: exynos850-a13nsxx_defconfig
+          
+          Build Environment:
+          - Host OS: Ubuntu 22.04
+          - Compiler: Clang 12.0.1-19ubuntu3
+          - Linker: LLD 12
+          - Cross Compiler: GCC 11 (aarch64-linux-gnu)
+          - Binutils: 2.38
+          
+          Build Flags:
+          - ARCH=arm64
+          - CROSS_COMPILE=aarch64-linux-gnu-
+          - LLVM=1
+          - LLVM_IAS=1
+          - CC=clang
+          - LD=ld.lld
+          
+          Artifacts Included:
+          - Image.gz: Compressed kernel image (ready to flash)
+          - Image: Uncompressed kernel image
+          - dtbs/: Device tree blobs for A13
+          - kernel.config: Complete kernel configuration
+          - build.log: Full build output for debugging
+          
+          Installation Instructions:
+          1. Use TWRP Recovery or Heimdall to flash Image.gz
+          2. Ensure device tree blobs are properly loaded
+          3. Check build.log for any warnings or errors
+          
+          Device Tree: Exynos850
+          Device Name: Samsung Galaxy A13 (SM-A135F)
+          EOF
+          
+          echo "=== Artifacts ===" && ls -lah artifacts/
+      
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-artifacts-samsung-a13
+          path: artifacts/
+          retention-days: 30
+      
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "=== Build Summary ===" && \
+          echo "Status: ${{ job.status }}" && \
+          echo "Device: Samsung Galaxy A13 (Exynos850)" && \
+          if [ -d artifacts/ ]; then
+            echo "" && \
+            echo "Build Artifacts:" && \
+            ls -lh artifacts/ && \
+            du -sh artifacts/
+          else
+            echo "No artifacts generated"
+          fi
